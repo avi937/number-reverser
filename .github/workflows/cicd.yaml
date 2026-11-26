@@ -354,13 +354,23 @@ jobs:
           chmod 600 ~/.kube/config
 
       - name: Terraform init & apply (kind backend — local state)
-        env:
-          TF_VAR_app_image: "${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}"
         run: |
           IMAGE_NAME_LOWER=$(echo "${{ env.REGISTRY }}/${{ github.repository_owner }}/number-reverser" | tr '[:upper:]' '[:lower:]')
           DIGEST="${{ needs.build.outputs.image_digest }}"
           cd terraform
-          terraform init -backend=false
+
+          # Override the S3 backend with local state for this ephemeral kind cluster.
+          # Terraform loads *_override.tf files and merges them, replacing the backend block.
+          cat > backend_override.tf << 'TFEOF'
+          terraform {
+            backend "local" {
+              path = "/tmp/kind-tfstate/terraform.tfstate"
+            }
+          }
+          TFEOF
+
+          mkdir -p /tmp/kind-tfstate
+          terraform init -reconfigure
           terraform apply -auto-approve \
             -var="app_image=${IMAGE_NAME_LOWER}@${DIGEST}" \
             -var="environment=prod" \

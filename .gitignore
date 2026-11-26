@@ -1,6 +1,7 @@
 # .gitignore — Number Reverser project
 
 # Terraform
+terraform/backend_override.tf
 .terraform/
 .terraform.lock.hcl
 *.tfstate
