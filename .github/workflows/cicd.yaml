@@ -184,15 +184,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Trivy (fail on CRITICAL)
+      - name: Run Trivy (table — see findings in log)
         uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
+          format: table
+          severity: "CRITICAL"
+          exit-code: "1"           # Fail pipeline ONLY on CRITICAL CVEs with fixes
+          ignore-unfixed: true     # Skip CVEs that have no patch yet
+
+      - name: Run Trivy (sarif — upload to Security tab)
+        uses: aquasecurity/trivy-action@master
+        if: always()               # Upload report even if previous step failed
         with:
           image-ref: ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
           format: sarif
           output: trivy-results.sarif
-          severity: "CRITICAL"     # Only fail on CRITICAL — HIGH is reported but not blocking
-          exit-code: "1"           # Non-zero exit = pipeline failure on CRITICAL CVEs
-          ignore-unfixed: true     # Skip CVEs with no fix available yet
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"           # Don't fail here — just generate the report
+          ignore-unfixed: true
 
       - name: Upload Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
