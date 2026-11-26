@@ -309,6 +309,7 @@ jobs:
         uses: helm/kind-action@v1.10.0
         with:
           cluster_name: number-reverser
+          node_image: kindest/node:v1.31.2   # K8s 1.31+ required for Kyverno CRDs (selectableFields)
           wait: 120s
 
       - name: Install Helm
@@ -321,8 +322,9 @@ jobs:
           helm install kyverno kyverno/kyverno \
             --namespace kyverno \
             --create-namespace \
+            --version 3.3.5 \
             --wait \
-            --timeout 120s
+            --timeout 180s
 
       - name: Apply Kyverno policies
         run: kubectl apply -f k8s/kyverno/policy.yaml
