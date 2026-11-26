@@ -63,8 +63,8 @@ class TestNonNumericInput:
 
 class TestIntegerOverflow:
     def test_large_number_within_range(self):
-        # 9223372036854775807 reversed = 7085746360273372329 — still in range
-        assert reverse_number("9223372036854775807") == "7085746360273372329"
+        # 9223372036854775807 reversed = 7085774586302733229 — still in range
+        assert reverse_number("9223372036854775807") == "7085774586302733229"
 
     def test_overflow_raises_value_error(self):
         # A number whose reversal exceeds INT64_MAX
