@@ -382,3 +382,62 @@ jobs:
           kubectl rollout status deployment/number-reverser -n number-reverser --timeout=120s
           kubectl get pods -n number-reverser
           kubectl get svc -n number-reverser
+
+      - name: Live API test — curl all edge cases
+        run: |
+          echo "Starting port-forward..."
+          kubectl port-forward svc/number-reverser 8080:80 -n number-reverser &
+          PF_PID=$!
+          sleep 5   # wait for port-forward to establish
+
+          echo ""
+          echo "=== HEALTH CHECK ==="
+          curl -sf http://localhost:8080/health | tee /tmp/health.json
+          echo ""
+
+          echo ""
+          echo "=== BASIC REVERSAL: 12345 → 54321 ==="
+          curl -sf -X POST http://localhost:8080/reverse \
+            -H "Content-Type: application/json" \
+            -d '{"n": "12345"}' | tee /tmp/test1.json
+          echo ""
+
+          echo ""
+          echo "=== NEGATIVE NUMBER: -123 → -321 ==="
+          curl -sf http://localhost:8080/reverse?n=-123 | tee /tmp/test2.json
+          echo ""
+
+          echo ""
+          echo "=== TRAILING ZEROS: 1200 → 21 ==="
+          curl -sf http://localhost:8080/reverse?n=1200 | tee /tmp/test3.json
+          echo ""
+
+          echo ""
+          echo "=== NON-NUMERIC: abc → 422 ==="
+          curl -s -o /tmp/test4.json -w "%{http_code}" \
+            http://localhost:8080/reverse?n=abc
+          echo ""
+          cat /tmp/test4.json
+          echo ""
+
+          echo ""
+          echo "=== INTEGER OVERFLOW: 99999999999999999999 → 422 ==="
+          curl -s -o /tmp/test5.json -w "%{http_code}" \
+            -X POST http://localhost:8080/reverse \
+            -H "Content-Type: application/json" \
+            -d '{"n": "99999999999999999999"}'
+          echo ""
+          cat /tmp/test5.json
+          echo ""
+
+          echo ""
+          echo "=== ALL TESTS DONE ==="
+
+          # Validate key responses
+          grep -q '"result":"54321"' /tmp/test1.json && echo "✅ Basic reversal correct"
+          grep -q '"result":"-321"' /tmp/test2.json && echo "✅ Negative number correct"
+          grep -q '"result":"21"' /tmp/test3.json && echo "✅ Trailing zeros correct"
+          grep -q '"error"' /tmp/test4.json && echo "✅ Non-numeric returns error"
+          grep -q '"error"' /tmp/test5.json && echo "✅ Overflow returns error"
+
+          kill $PF_PID 2>/dev/null || true
