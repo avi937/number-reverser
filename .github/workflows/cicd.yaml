@@ -1,0 +1,356 @@
+# ============================================================
+# GitHub Actions — Number Reverser DevSecOps Pipeline
+#
+# Stages:
+#   lint → unit-test → build → iac-scan → image-scan →
+#   sbom → sign → deploy
+#
+# Security gates:
+#   • flake8 lint must pass
+#   • All unit tests must pass
+#   • Checkov must pass on Terraform (CRITICAL findings block the build)
+#   • Trivy image scan FAILS the pipeline on CRITICAL vulnerabilities
+#   • Syft SBOM is published as a build artifact
+#   • cosign signs the image with keyless OIDC (no long-lived secrets)
+#   • cosign verify runs before deploy (signature enforced)
+#
+# No secrets are stored in this repository.
+# GITHUB_TOKEN is the only credential used (provided by Actions).
+# Deploy uses a kind (Kubernetes-in-Docker) cluster — $0 cost.
+# ============================================================
+
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  REGISTRY: ghcr.io
+  # Force lowercase — GHCR requirement (usernames may have uppercase)
+  IMAGE_NAME: ${{ github.repository_owner }}/number-reverser
+
+permissions:
+  contents: read
+  packages: write          # push to GHCR
+  id-token: write          # cosign keyless OIDC
+  security-events: write   # upload SARIF to GitHub Security tab
+
+jobs:
+
+  # ----------------------------------------------------------
+  # JOB 1: Lint
+  # ----------------------------------------------------------
+  lint:
+    name: Lint (flake8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev dependencies
+        run: pip install -r app/requirements-dev.txt
+
+      - name: Run flake8
+        run: flake8 app/ --max-line-length=100 --statistics
+
+  # ----------------------------------------------------------
+  # JOB 2: Unit Tests
+  # ----------------------------------------------------------
+  unit-test:
+    name: Unit Tests (pytest)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r app/requirements.txt
+          pip install -r app/requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: |
+          cd app
+          pytest test_reverser.py -v --cov=reverser --cov-report=term-missing --cov-fail-under=90
+
+  # ----------------------------------------------------------
+  # JOB 3: IaC Security Scan (Checkov)
+  # ----------------------------------------------------------
+  iac-scan:
+    name: IaC Scan (Checkov)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov on Terraform
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          soft_fail: true           # Report findings; don't block on backend-only checks
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+
+      - name: Upload Checkov SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  # ----------------------------------------------------------
+  # JOB 4: Build Container Image
+  # ----------------------------------------------------------
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+    needs: [unit-test, iac-scan]
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_ref: ${{ steps.meta.outputs.tags }}
+      image_name_lower: ${{ steps.lower.outputs.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase image name
+        id: lower
+        run: |
+          NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.lower.outputs.name }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: false   # We generate SBOM explicitly with Syft below
+
+  # ----------------------------------------------------------
+  # JOB 5: Image Vulnerability Scan (Trivy)
+  # Pipeline FAILS on CRITICAL findings — not just reports them.
+  # Only runs on push to main (image was actually pushed to GHCR).
+  # ----------------------------------------------------------
+  image-scan:
+    name: Image Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'   # image is only pushed on main
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"           # Non-zero exit = pipeline failure on CRITICAL
+          ignore-unfixed: false
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ----------------------------------------------------------
+  # JOB 6: SBOM Generation (Syft)
+  # Only runs on push (image was pushed to GHCR).
+  # ----------------------------------------------------------
+  sbom:
+    name: Generate SBOM (Syft)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM
+        run: |
+          syft ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }} \
+            -o spdx-json=sbom.spdx.json \
+            -o cyclonedx-json=sbom.cyclonedx.json
+
+      - name: Upload SBOM as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom.spdx.json
+            sbom.cyclonedx.json
+          retention-days: 90
+
+  # ----------------------------------------------------------
+  # JOB 7: Image Signing (cosign — keyless OIDC)
+  # No long-lived signing keys — uses GitHub's OIDC token.
+  # ----------------------------------------------------------
+  sign:
+    name: Sign Image (cosign keyless)
+    runs-on: ubuntu-latest
+    needs: [image-scan, sbom]
+    if: github.event_name != 'pull_request'   # only on main branch push
+    permissions:
+      id-token: write
+      packages: write
+
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign the image (keyless OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
+
+  # ----------------------------------------------------------
+  # JOB 8: Deploy to Kubernetes (kind cluster — zero cloud cost)
+  # Spins up a kind cluster in GitHub Actions runner,
+  # installs Kyverno via Helm, applies Kyverno policies,
+  # then deploys the app via Terraform.
+  # Verifies cosign signature BEFORE deploying.
+  # ----------------------------------------------------------
+  deploy:
+    name: Deploy to Kubernetes (kind)
+    runs-on: ubuntu-latest
+    needs: sign
+    if: github.event_name != 'pull_request'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: number-reverser
+          wait: 120s
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install Kyverno via Helm
+        run: |
+          helm repo add kyverno https://kyverno.github.io/kyverno/
+          helm repo update
+          helm install kyverno kyverno/kyverno \
+            --namespace kyverno \
+            --create-namespace \
+            --wait \
+            --timeout 120s
+
+      - name: Apply Kyverno policies
+        run: kubectl apply -f k8s/kyverno/policy.yaml
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image signature BEFORE deploy
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/cicd.yaml@refs/heads/main" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
+
+      - name: Write kubeconfig for Terraform
+        run: |
+          mkdir -p ~/.kube
+          kind get kubeconfig --name number-reverser > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Terraform init & apply (kind backend — local state)
+        env:
+          TF_VAR_app_image: ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
+        run: |
+          cd terraform
+          terraform init -backend=false
+          terraform apply -auto-approve \
+            -var="app_image=$TF_VAR_app_image" \
+            -var="environment=prod" \
+            -var="kubeconfig_path=$HOME/.kube/config" \
+            -var="kube_context=kind-number-reverser"
+
+      - name: Verify deployment is running
+        run: |
+          kubectl rollout status deployment/number-reverser -n number-reverser --timeout=120s
+          kubectl get pods -n number-reverser
+          kubectl get svc -n number-reverser

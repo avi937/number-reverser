@@ -1,0 +1,83 @@
+# Kyverno ClusterPolicy: enforce baseline security standards
+# across all pods in the number-reverser namespace.
+#
+# Rules enforced:
+#   1. No privileged containers
+#   2. Resource limits (CPU + memory) are required
+#   3. No :latest image tags
+#   4. Containers must run as non-root
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: number-reverser-baseline
+  annotations:
+    policies.kyverno.io/title: Number Reverser Baseline Security
+    policies.kyverno.io/description: >
+      Enforces security best-practices for the number-reverser namespace:
+      no privileged pods, resource limits required, no :latest tags, non-root only.
+spec:
+  validationFailureAction: Enforce   # Reject non-compliant pods at admission
+  background: true
+
+  rules:
+
+    # Rule 1: No privileged containers
+    - name: disallow-privileged
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [number-reverser]
+      validate:
+        message: "Privileged containers are not allowed."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+
+    # Rule 2: Resource limits must be set
+    - name: require-resource-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [number-reverser]
+      validate:
+        message: "CPU and memory limits must be set on all containers."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+                    cpu: "?*"
+
+    # Rule 3: No :latest image tags
+    - name: disallow-latest-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [number-reverser]
+      validate:
+        message: "Using ':latest' image tag is not allowed. Use a specific digest or version tag."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+
+    # Rule 4: Containers must run as non-root
+    - name: require-non-root
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [number-reverser]
+      validate:
+        message: "Containers must run as a non-root user (runAsNonRoot: true)."
+        pattern:
+          spec:
+            =(securityContext):
+              runAsNonRoot: true

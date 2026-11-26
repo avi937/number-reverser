@@ -1,0 +1,15 @@
+# terraform.tfvars.example
+# Copy this file to terraform.tfvars and fill in real values.
+# NEVER commit terraform.tfvars — it is listed in .gitignore.
+
+app_name      = "number-reverser"
+app_image     = "ghcr.io/YOUR_GITHUB_USERNAME/number-reverser:sha-abc1234"
+app_port      = 8080
+replica_count = 2
+namespace     = "number-reverser"
+environment   = "dev"
+
+# kubeconfig — set to the path of your local kubeconfig file
+# In CI, this is injected via the KUBECONFIG secret
+kubeconfig_path = "~/.kube/config"
+kube_context    = "kind-number-reverser"

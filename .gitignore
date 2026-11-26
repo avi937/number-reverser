@@ -1,0 +1,44 @@
+# .gitignore — Number Reverser project
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+terraform.tfvars        # contains actual values — never commit!
+*.auto.tfvars
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+venv/
+.venv/
+
+# Secrets / credentials — NEVER commit these
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.env
+.env.*
+kubeconfig
+kubeconfig.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
