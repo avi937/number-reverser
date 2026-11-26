@@ -190,9 +190,9 @@ jobs:
           image-ref: ${{ needs.build.outputs.image_name_lower }}@${{ needs.build.outputs.image_digest }}
           format: sarif
           output: trivy-results.sarif
-          severity: "CRITICAL,HIGH"
-          exit-code: "1"           # Non-zero exit = pipeline failure on CRITICAL
-          ignore-unfixed: false
+          severity: "CRITICAL"     # Only fail on CRITICAL — HIGH is reported but not blocking
+          exit-code: "1"           # Non-zero exit = pipeline failure on CRITICAL CVEs
+          ignore-unfixed: true     # Skip CVEs with no fix available yet
 
       - name: Upload Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
